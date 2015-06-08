@@ -1,5 +1,5 @@
-{-# OPTIONS_GHC -Wall -fno-warn-warnings-deprecations #-}
-{-# LANGUAGE DoRec                           #-}
+{-# OPTIONS_GHC -Wall #-}
+{-# LANGUAGE RecursiveDo #-}
 
 
 -- | The data definition of a "TardisT"
