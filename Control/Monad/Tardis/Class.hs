@@ -17,6 +17,8 @@ module Control.Monad.Tardis.Class
     -- * Composite Tardis operations
   , modifyForwards
   , modifyBackwards
+  , modifyForwards'
+  , modifyBackwards'
   , getsPast
   , getsFuture
   ) where
@@ -89,6 +91,21 @@ modifyBackwards f = do
   rec
     sendPast (f x)
     x <- getFuture
+  return ()
+
+-- | Modify the forwards-traveling state /strictly/
+-- as it passes through from past to future.
+modifyForwards' :: MonadTardis bw fw m => (fw -> fw) -> m ()
+modifyForwards' f = getPast >>= (sendFuture $!) . f
+
+-- | Modify the backwards-traveling state /strictly/
+-- as it passes through from future to past.  /This is in general very
+-- dangerous!/ Strictness is antithetical to the time-traveling nature of this
+-- state.
+modifyBackwards' :: MonadTardis bw fw m => (bw -> bw) -> m ()
+modifyBackwards' f = mdo
+  sendPast $! f x
+  x <- getFuture
   return ()
 
 -- | Retrieve a specific view of the forwards-traveling state.

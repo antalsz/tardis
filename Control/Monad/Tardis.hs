@@ -18,19 +18,13 @@ module Control.Monad.Tardis
 
 
 import Control.Monad.Tardis.Class
-import Control.Monad.Trans.Tardis
-  ( TardisT
-  , runTardisT
-  , evalTardisT
-  , execTardisT
-
-  , Tardis
-  , runTardis
-  , evalTardis
-  , execTardis
-  
-  , noState
-  )
+import Control.Monad.Trans.Tardis hiding
+  ( getPast, getFuture
+  , sendPast, sendFuture
+  , modifyForwards, modifyBackwards
+  , modifyForwards', modifyBackwards'
+  , getsPast, getsFuture
+  , tardis )
 
 
 {- $whatis

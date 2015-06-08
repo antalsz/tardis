@@ -1,6 +1,9 @@
 {-# OPTIONS_GHC -Wall #-}
-{-# LANGUAGE RecursiveDo #-}
-
+{-# LANGUAGE RecursiveDo           #-}
+{-# LANGUAGE TupleSections         #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE FlexibleInstances     #-}
+{-# LANGUAGE UndecidableInstances  #-}
 
 -- | The data definition of a "TardisT"
 -- as well as its primitive operations,
@@ -11,7 +14,6 @@
 module Control.Monad.Trans.Tardis (
     -- * The Tardis monad transformer
     TardisT(..)
-  , runTardisT
   , evalTardisT
   , execTardisT
 
@@ -33,17 +35,47 @@ module Control.Monad.Trans.Tardis (
   , modifyForwards
   , modifyBackwards
 
+  , modifyForwards'
+  , modifyBackwards'
+
   , getsPast
   , getsFuture
 
     -- * Other
   , noState
+
+    -- * Manupulating the Tardis monad
+  , mapTardis
+  , mapBackwards
+  , mapForwards
+  , withTardis
+  , withBackwards
+  , withForwards
+    
+    -- * Manupulating the Tardis monad transformer
+  , mapTardisT
+  , withTardisT
+  , withBackwardsT
+  , withForwardsT
+
+    -- * Lifting other operations
+  , liftListen
+  , liftPass
+  , liftCatch
+  , liftCallCC
+  , liftCallCC'
   ) where
 
+import Control.Arrow
 import Control.Applicative
 import Control.Monad.Identity
 import Control.Monad.Trans
 
+-- For instances
+import Control.Monad.Reader
+import Control.Monad.Writer
+import Control.Monad.Error
+import Control.Monad.Cont
 
 -- Definition
 -------------------------------------------------
@@ -125,6 +157,13 @@ instance MonadFix m => Applicative (TardisT bw fw m) where
   pure = return
   (<*>) = ap
 
+instance (MonadFix m, Alternative m) => Alternative (TardisT bw fw m) where
+  empty   = TardisT $ \_ -> empty
+  m <|> n = TardisT $ \s -> runTardisT m s <|> runTardisT n s
+
+instance (MonadFix m, MonadPlus m) => MonadPlus (TardisT bw fw m) where
+  mzero       = TardisT $ \_ -> mzero
+  m `mplus` n = TardisT $ \s -> runTardisT m s `mplus` runTardisT n s
 
 instance MonadTrans (TardisT bw fw) where
   lift m = TardisT $ \s -> do
@@ -136,6 +175,28 @@ instance MonadFix m => MonadFix (TardisT bw fw m) where
     rec (x, s') <- runTardisT (f x) s
     return (x, s')
 
+instance (MonadFix m, MonadReader r m) => MonadReader r (TardisT bw fw m) where
+  ask    = lift ask
+  local  = mapTardisT . local
+  reader = lift . reader
+
+instance (MonadFix m, MonadWriter w m) => MonadWriter w (TardisT bw fw m) where
+  writer = lift . writer
+  tell   = lift . tell
+  listen = liftListen listen
+  pass   = liftPass   pass
+
+instance (MonadFix m, MonadError e m) => MonadError e (TardisT bw fw m) where
+  throwError = lift . throwError
+  catchError = liftCatch catchError
+
+instance (MonadFix m, MonadIO m) => MonadIO (TardisT bw fw m) where
+  liftIO = lift . liftIO
+
+-- | This instance is modeled after 'State''s instance, but I'll be the first to
+-- admit I don't really understand it.
+instance (MonadFix m, MonadCont m) => MonadCont (TardisT bw fw m) where
+  callCC = liftCallCC' callCC
 
 -- Basics
 -------------------------------------------------
@@ -192,6 +253,23 @@ modifyBackwards f = do
   return ()
 
 
+-- | Modify the forwards-traveling state /strictly/
+-- as it passes through from past to future.
+modifyForwards' :: MonadFix m => (fw -> fw) -> TardisT bw fw m ()
+modifyForwards' f = getPast >>= (sendFuture $!) . f
+
+
+-- | Modify the backwards-traveling state /strictly/
+-- as it passes through from future to past.  /This is in general very
+-- dangerous!/ Strictness is antithetical to the time-traveling nature of this
+-- state.
+modifyBackwards' :: MonadFix m => (bw -> bw) -> TardisT bw fw m ()
+modifyBackwards' f = mdo
+  sendPast $! f x
+  x <- getFuture
+  return ()
+
+
 -- | Retrieve a specific view of the forwards-traveling state.
 getsPast :: MonadFix m => (fw -> a) -> TardisT bw fw m a
 getsPast f = fmap f getPast
@@ -201,3 +279,126 @@ getsPast f = fmap f getPast
 getsFuture :: MonadFix m => (bw -> a) -> TardisT bw fw m a
 getsFuture f = fmap f getFuture
 
+{------------------------------------------------------------------------------}
+
+-- | Map both the return value and both final states of a computation using the
+-- given function.
+--
+-- * @'runTardis' ('mapTardis' f m) = f . 'runTardis' m@
+mapTardis :: ((a, (bw,fw)) -> (b, (bw,fw))) -> Tardis bw fw a -> Tardis bw fw b
+mapTardis f = mapTardisT (Identity . f . runIdentity)
+
+-- | Map both the return value and final backwards state of a computation using
+-- the given function (leaving the forwards state unchanged).  Like 'mapTardis'
+-- but just for the backwards state.
+mapBackwards :: ((a,bw) -> (b,bw)) -> Tardis bw fw a -> Tardis bw fw b
+mapBackwards f = mapTardis $ \(a,(bw,fw)) -> (,fw) <$> f (a,bw)
+
+-- | Map both the return value and final forwards state of a computation using
+-- the given function (leaving the backwards state unchanged).  Like 'mapTardis'
+-- but just for the forwards state.
+mapForwards :: ((a,fw) -> (b,fw)) -> Tardis bw fw a -> Tardis bw fw b
+mapForwards f = mapTardis $ \(a,(bw,fw)) -> (bw,) <$> f (a,fw)
+
+-- | @'withTardis' f m@ executes the action @m@ on a pair of forwards and
+-- backwards states modified by applying @f@.  See also 'withBackwards' and
+-- 'withForwards'.
+withTardis :: ((bw,fw) -> (bw,fw)) -> Tardis bw fw a -> Tardis bw fw a
+withTardis = withTardisT
+
+-- | @'withBackwards' f m@ executes the action @m@ on a backwards state modified
+-- by 'f' and an unmodified forwards state.
+withBackwards :: (bw -> bw) -> Tardis bw fw a -> Tardis bw fw a
+withBackwards = withBackwardsT
+
+-- | @'withForwards' f m@ executes the action @m@ on an unmodified backwards
+-- state and a forwards state modified by 'f'.
+withForwards :: (fw -> fw) -> Tardis bw fw a -> Tardis bw fw a
+withForwards = withForwardsT
+
+-- | Map both the return value and both final states of a computation using the
+-- given function.  You can't implement @mapBackwardsT :: (m (a,bw) -> n (b,bw))
+-- -> TardisT bw fw m a -> TardisT bw fw n b@ in general (due to the lack of
+-- constraints on @m@ and @n@), and similarly for @mapForwardsT@.
+--
+-- * @'runTardisT' ('mapTardisT' f m) = f . 'runTardisT' m@
+mapTardisT :: (m (a, (bw,fw)) -> n (b, (bw,fw))) -> TardisT bw fw m a -> TardisT bw fw n b
+mapTardisT f m = TardisT $ f . runTardisT m
+
+-- | @'withTardisT' f m@ executes the action @m@ on a pair of forwards and
+-- backwards states modified by applying @f@.  See also 'withBackwardsT' and
+-- 'withForwardsT'.
+withTardisT :: ((bw,fw) -> (bw,fw)) -> TardisT bw fw m a -> TardisT bw fw m a
+withTardisT f m = TardisT $ runTardisT m . f
+
+-- | @'withBackwardsT' f m@ executes the action @m@ on a backwards state modified
+-- by 'f' and an unmodified forwards state.
+withBackwardsT :: (bw -> bw) -> TardisT bw fw m a -> TardisT bw fw m a
+withBackwardsT = withTardisT . first
+
+-- | @'withForwardsT' f m@ executes the action @m@ on an unmodified backwards
+-- state and a forwards state modified by 'f'.
+withForwardsT :: (fw -> fw) -> TardisT bw fw m a -> TardisT bw fw m a
+withForwardsT = withTardisT . second
+
+{------------------------------------------------------------------------------}
+
+-- For backwards compatibility, we inline the following type synonyms from
+-- @transformers-0.4.0.0@ and up (in "Control.Monad.Signatures"):
+--
+--   * @type Listen w m a = m a -> m (a,w)@
+--   * @type Pass w m a = m (a, w -> w) -> m a@
+--   * @type Catch e m a = m a -> (e -> m a) -> m a@
+--   * @type CallCC m a b = ((a -> m b) -> m a) -> m a@
+--
+-- The "right" types for these operations are:
+--
+--   * @liftListen :: (Monad m) => Listen w m (a,(bw,fw)) -> Listen w (TardisT bw fw m) a@
+--   * @liftPass :: (Monad m) => Pass w m (a,(bw,fw)) -> Pass w (TardisT bw fw m) a@
+--   * @liftCatch :: Catch e m (a,(bw,fw)) -> Catch e (TardisT bw fw m) a@
+--   * @liftCallCC :: CallCC m (a,(bw,fw)) (b,(bw,fw)) -> CallCC (TardisT bw fw m) a b@
+--   * @liftCallCC' :: CallCC m (a,(bw,fw)) (b,(bw,fw)) -> CallCC (TardisT bw fw m) a b@
+
+
+-- | Lift a @listen@ operation into the 'TardisT' transformer.
+liftListen :: Monad m
+           => (m (a,(bw,fw)) -> m ((a,(bw,fw)),w))
+           -> (TardisT bw fw m a -> TardisT bw fw m (a,w))
+liftListen listen' m = TardisT $ \s -> do
+    ((a, s'), w) <- listen' $ runTardisT m s
+    return ((a, w), s')
+
+-- | Lift a @pass@ operation into the 'TardisT' transformer.
+liftPass :: Monad m
+         => (m ((a,(bw,fw)), w -> w) -> m (a,(bw,fw)))
+         -> (TardisT bw fw m (a, w -> w) -> TardisT bw fw m a)
+liftPass pass' m = TardisT $ \s -> pass' $ do
+    ((a, f), s') <- runTardisT m s
+    return ((a, s'), f)
+
+-- | Lift a @catchE@ operation into the 'TardisT' transformer.
+liftCatch :: (m (a,(bw,fw)) -> (e -> m (a,(bw,fw))) -> m (a,(bw,fw)))
+          -> (TardisT bw fw m a -> (e -> TardisT bw fw m a) -> TardisT bw fw m a)
+liftCatch catchE' m h =
+    TardisT $ \s -> runTardisT m s `catchE'` \e -> runTardisT (h e) s
+
+-- | Uniform (I think) lifting of a @callCC@ operation into the 'TardisT' transformer.
+-- This version rolls back to the original states on entering the continuation.
+-- (I'm not 100% sure this is the right implementation in the presence of time
+-- travel, though.)
+liftCallCC :: ((((a,(bw,fw)) -> m (b,(bw,fw))) -> m (a,(bw,fw))) -> m (a,(bw,fw)))
+           -> (((a -> TardisT bw fw m b) -> TardisT bw fw m a) -> TardisT bw fw m a)
+liftCallCC callCC' f = TardisT $ \s ->
+    callCC' $ \c ->
+    runTardisT (f (\a -> TardisT $ \_ -> c (a, s))) s
+
+-- | In-situ lifting of a @callCC@ operation into the 'TardisT' transformer.
+-- This version uses the current states on entering the continuation.  It does
+-- not satisfy the uniformity property (I think; see
+-- "Control.Monad.Signatures").  (I'm not 100% sure this is the right
+-- implementation in the presence of time travel, though.)
+liftCallCC' :: ((((a,(bw,fw)) -> m (b,(bw,fw))) -> m (a,(bw,fw))) -> m (a,(bw,fw)))
+            -> (((a -> TardisT bw fw m b) -> TardisT bw fw m a) -> TardisT bw fw m a)
+liftCallCC' callCC' f = TardisT $ \s ->
+    callCC' $ \c ->
+    runTardisT (f (\a -> TardisT $ \s' -> c (a, s'))) s
