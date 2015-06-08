@@ -10,7 +10,7 @@
 -- of what a Tardis is and how to use it.
 module Control.Monad.Trans.Tardis (
     -- * The Tardis monad transformer
-    TardisT
+    TardisT(..)
   , runTardisT
   , evalTardisT
   , execTardisT
