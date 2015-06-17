@@ -3,6 +3,7 @@
 {-# LANGUAGE MultiParamTypeClasses  #-}
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE FlexibleInstances      #-}
+{-# LANGUAGE UndecidableInstances      #-}
 
 
 -- | The class definition of a Tardis,
@@ -25,6 +26,14 @@ module Control.Monad.Tardis.Class
 
 import Control.Applicative
 import Control.Monad.Fix
+
+-- For instances
+import Control.Monad.Trans
+import Control.Monad.Reader              (ReaderT())
+import Data.Monoid                       (Monoid())
+import Control.Monad.Writer.Lazy   as WL (WriterT())
+import Control.Monad.Writer.Strict as WS (WriterT())
+import Control.Monad.Error               (ErrorT(), Error())
 
 import qualified Control.Monad.Trans.Tardis as T
 
@@ -123,3 +132,32 @@ instance MonadFix m => MonadTardis bw fw (T.TardisT bw fw m) where
   sendPast   = T.sendPast
   sendFuture = T.sendFuture
   tardis     = T.tardis
+
+instance MonadTardis bw fw m => MonadTardis bw fw (ReaderT r m) where
+  getPast    = lift $ getPast
+  getFuture  = lift $ getFuture
+  sendPast   = lift . sendPast
+  sendFuture = lift . sendFuture
+  tardis     = lift . tardis
+
+instance (MonadTardis bw fw m, Monoid w) => MonadTardis bw fw (WL.WriterT w m) where
+  getPast    = lift $ getPast
+  getFuture  = lift $ getFuture
+  sendPast   = lift . sendPast
+  sendFuture = lift . sendFuture
+  tardis     = lift . tardis
+
+instance (MonadTardis bw fw m, Monoid w) => MonadTardis bw fw (WS.WriterT w m) where
+  getPast    = lift $ getPast
+  getFuture  = lift $ getFuture
+  sendPast   = lift . sendPast
+  sendFuture = lift . sendFuture
+  tardis     = lift . tardis
+
+instance (MonadTardis bw fw m, Error e) => MonadTardis bw fw (ErrorT e m) where
+  getPast    = lift $ getPast
+  getFuture  = lift $ getFuture
+  sendPast   = lift . sendPast
+  sendFuture = lift . sendFuture
+  tardis     = lift . tardis
+
